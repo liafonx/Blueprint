@@ -4,9 +4,9 @@ return {
   },
   misc = {
     dictionary = {
-      blueprint_config = "动态 蓝图",
+      blueprint_config = "动态蓝图效果",
       testtesttest = "hi hello hi",
-      brainstorm_config = "动态 头脑风暴"
+      brainstorm_config = "动态头脑风暴效果"
     }
   }
 }
