@@ -38,7 +38,8 @@ float gaussian_blur(Image jokers_sampler, ivec2 texture_coords) {
             if (blur_amount == 0)
                 factor = 1.0;
             else {
-                factor = exp(-dot(offset, offset) / float(blur_amount * blur_amount));
+                float dist2 = float(offset.x * offset.x + offset.y * offset.y);
+                factor = exp(-dist2 / float(blur_amount * blur_amount));
             }
             col += greyscale(myTexelFetch(jokers_sampler, texture_coords + offset)) * factor;
             total += factor;
