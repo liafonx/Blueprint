@@ -244,152 +244,170 @@ local function equal_sprites(first, second)
     return first.atlas.name == second.atlas.name and first.sprite_pos.x == second.sprite_pos.x and first.sprite_pos.y == second.sprite_pos.y
 end
 
-local function align_brainstorm(self, card)
-    if not self.brainstorm_T then
-        self.brainstorm_T = {h = self.T.h, w = self.T.w}
-    end
-
-    self.T.h = card.T.h
-    self.T.w = card.T.w
-    self.children.center.scale.y = card.children.center.scale.y
-
-    return self.T.h / self.brainstorm_T.h
-end
-
-local function align_sprite(self, card, restore)
-    --if is_brainstorm(self) then return end -- this should never affect brainstorm
+-- Unified alignment function for both Blueprint and Brainstorm
+-- Handles caching, dimension alignment, and aspect ratio calculation
+-- Note: Does NOT set scale.y during alignment since sprites get replaced after this call
+--       Callers should set scale.y on new sprites themselves if needed
+local function align_card(self, card, restore)
     if restore then
+        -- Restore cached dimensions
         if self.blueprint_T then
             self.T.h = self.blueprint_T.h
             self.T.w = self.blueprint_T.w
---        else
---            self.T.h = G.CARD_H
---            self.T.w = G.CARD_W
+            self.blueprint_T = nil
         end
-        return
+        -- Restore cached scale.y on the restored original sprite
+        if self.blueprint_scale_y then
+            self.children.center.scale.y = self.blueprint_scale_y
+            self.blueprint_scale_y = nil
+        end
+        return 1.0
     end
 
+    -- Cache original dimensions and scale BEFORE any modifications
     if not self.blueprint_T then
         self.blueprint_T = {h = self.T.h, w = self.T.w}
+        self.blueprint_scale_y = self.children.center.scale.y
     end
 
+    -- Align to copied card's dimensions
     self.T.h = card.T.h
     self.T.w = card.T.w
+    -- Note: scale.y is NOT set here - sprites get replaced, so caller handles it
+
+    -- Calculate aspect ratio change, not raw height change
+    -- This prevents double-scaling for uniformly-scaled jokers like Wee Joker
+    -- Only scale the background pattern when aspect ratio actually changes (e.g., Cavendish)
+    local original_aspect = self.blueprint_T.h / self.blueprint_T.w
+    local new_aspect = card.T.h / card.T.w
+    return new_aspect / original_aspect
+end
+
+-- Helper: Check if dimensions and scale match (for early return optimization)
+local function dimensions_match(self, card)
+    return self.T.h == card.T.h and self.T.w == card.T.w and
+           self.children.center.scale.y == card.children.center.scale.y
+end
+
+-- Helper: Calculate floating sprite offset (used by brainstorm for texture baking)
+local function get_floating_offset(card)
+    if not card.children.floating_sprite then return nil end
+    return {
+        x = (card.children.floating_sprite.sprite_pos.x * card.children.floating_sprite.atlas.px) -
+            (card.children.center.sprite_pos.x * card.children.center.atlas.px),
+        y = (card.children.floating_sprite.sprite_pos.y * card.children.floating_sprite.atlas.py) -
+            (card.children.center.sprite_pos.y * card.children.center.atlas.py)
+    }
+end
+
+-- Helper: Calculate aspect ratio scale (for brainstorm background pattern)
+local function get_aspect_scale(self, card)
+    local original_h = self.blueprint_T and self.blueprint_T.h or self.T.h
+    local original_w = self.blueprint_T and self.blueprint_T.w or self.T.w
+    return (card.T.h / card.T.w) / (original_h / original_w)
+end
+
+-- Helper: Setup center sprite with common configuration
+local function setup_center_sprite(self, card, atlas, sprite_pos)
+    self.children.center = Sprite(self.T.x, self.T.y, self.T.w, self.T.h, atlas, sprite_pos)
+    self.children.center.states.hover = self.states.hover
+    self.children.center.states.click = self.states.click
+    self.children.center.states.drag = self.states.drag
+    self.children.center.states.collide.can = false
+    self.children.center:set_role({major = self, role_type = 'Glued', draw_major = self})
     self.children.center.scale.y = card.children.center.scale.y
 end
 
-local function blueprint_sprite(blueprint, card)
+-- Helper: Setup floating sprite (Blueprint only - Brainstorm bakes it into texture)
+local function setup_floating_sprite(self, card, atlas)
+    self.children.floating_sprite = Sprite(self.T.x, self.T.y, self.T.w, self.T.h, atlas, card.children.floating_sprite.sprite_pos)
+    self.children.floating_sprite.role.draw_major = self
+    self.children.floating_sprite.states.hover.can = false
+    self.children.floating_sprite.states.click.can = false
+    self.children.floating_sprite.scale.y = card.children.floating_sprite.scale.y
+end
+
+-- Helper: Prepare for sprite update (cache, align, cleanup)
+local function prepare_sprite_update(self, card)
+    -- Cache original sprite BEFORE any modifications
+    if not self.blueprint_sprite_copy then
+        self.blueprint_sprite_copy = self.children.center
+    end
+
+    -- Align dimensions to copied card (caches original dimensions on first call)
+    align_card(self, card)
+
+    -- Remove floating sprite if exists
+    if self.children.floating_sprite then
+        self.children.floating_sprite:remove()
+        self.children.floating_sprite = nil
+    end
+
+    -- Remove current sprite if we already cached the original
+    if self.children.center ~= self.blueprint_sprite_copy then
+        self.children.center:remove()
+    end
+
+    self.blueprint_copy_key = card.config.center.key
+end
+
+-- Blueprint: Color-shifted copy of joker sprite
+local function blueprint_sprite(self, card)
+    -- Early return: skip if atlas exists and everything matches
     if pre_blueprinted(card.children.center.atlas).atlas then
-        if equal_sprites(blueprint.children.center, card.children.center) then
-            if equal_sprites(blueprint.children.floating_sprite, card.children.floating_sprite) then
-                return
-            end
+        if equal_sprites(self.children.center, card.children.center) and
+           equal_sprites(self.children.floating_sprite, card.children.floating_sprite) and
+           dimensions_match(self, card) then
+            return
         end
     end
-        
-    -- Not copying any other joker's sprite at the moment. Cache current sprite before updating
-    if not blueprint.blueprint_sprite_copy then
-        blueprint.blueprint_sprite_copy = blueprint.children.center
-    end
-    blueprint.blueprint_copy_key = card.config.center.key
 
-    -- Make sure to remove floating sprite before applying new one
-    if blueprint.children.floating_sprite then
-        blueprint.children.floating_sprite:remove()
-        blueprint.children.floating_sprite = nil
-    end
-
-    align_sprite(blueprint, nil, true)
-
-    blueprint.children.center = Sprite(blueprint.T.x, blueprint.T.y, blueprint.T.w, blueprint.T.h, blueprint_atlas(card.children.center.atlas), card.children.center.sprite_pos)
-    blueprint.children.center.states.hover = blueprint.states.hover
-    blueprint.children.center.states.click = blueprint.states.click
-    blueprint.children.center.states.drag = blueprint.states.drag
-    blueprint.children.center.states.collide.can = false
-    blueprint.children.center:set_role({major = blueprint, role_type = 'Glued', draw_major = blueprint})
+    prepare_sprite_update(self, card)
+    setup_center_sprite(self, card, blueprint_atlas(card.children.center.atlas), card.children.center.sprite_pos)
 
     if card.children.floating_sprite then
-        blueprint.children.floating_sprite = Sprite(blueprint.T.x, blueprint.T.y, blueprint.T.w, blueprint.T.h, blueprint_atlas(card.children.floating_sprite.atlas), card.children.floating_sprite.sprite_pos)
-        blueprint.children.floating_sprite.role.draw_major = blueprint
-        blueprint.children.floating_sprite.states.hover.can = false
-        blueprint.children.floating_sprite.states.click.can = false
+        setup_floating_sprite(self, card, blueprint_atlas(card.children.floating_sprite.atlas))
     end
-
-    --if card.children.floating_sprite2 then
-    --    blueprint.children.floating_sprite2 = Sprite(blueprint.T.x, blueprint.T.y, blueprint.T.w, blueprint.T.h, G.ASSET_ATLAS[card.children.floating_sprite2.atlas.name], card.children.floating_sprite2.sprite_pos)
-    --    blueprint.children.floating_sprite2.role.draw_major = blueprint
-    --    blueprint.children.floating_sprite2.states.hover.can = false
-    --    blueprint.children.floating_sprite2.states.click.can = false
-    --end
-    align_sprite(blueprint, card)
 end
 
-local function brainstorm_sprite(brainstorm, card)
-    local offset = nil
-    if card.children.floating_sprite then
-        offset = {}
-        offset.x =
-            (card.children.floating_sprite.sprite_pos.x * card.children.floating_sprite.atlas.px) -
-            (card.children.center.sprite_pos.x * card.children.center.atlas.px)
-        offset.y =
-            (card.children.floating_sprite.sprite_pos.y * card.children.floating_sprite.atlas.py) -
-            (card.children.center.sprite_pos.y * card.children.center.atlas.py)
-        -- print(card.children.floating_sprite.sprite_pos.x - card.children.center.sprite_pos.x, card.children.floating_sprite.sprite_pos.y - card.children.center.sprite_pos.y)
-        -- print(offset.x, offset.y)
-    end
+-- Brainstorm: Edge-detected copy with scaled background pattern
+local function brainstorm_sprite(self, card)
+    local offset = get_floating_offset(card)
+    local h_scale = get_aspect_scale(self, card)
+    local needed_atlas = card.children.floating_sprite
+        and brainstorm_atlas(card.children.center.atlas, card.children.floating_sprite.atlas, offset, h_scale)
+        or brainstorm_atlas(card.children.center.atlas, nil, nil, h_scale)
 
-    local h_scale = align_brainstorm(brainstorm, card)
-    local needed_atlas = card.children.floating_sprite and brainstorm_atlas(card.children.center.atlas, card.children.floating_sprite.atlas, offset, h_scale)
-                                                        or brainstorm_atlas(card.children.center.atlas, nil, nil, h_scale)
-    
-    if brainstorm.children.center.atlas.name == needed_atlas.name and card.children.center.sprite_pos.x == brainstorm.children.center.sprite_pos.x and card.children.center.sprite_pos.y == brainstorm.children.center.sprite_pos.y then
+    -- Early return: skip if atlas and everything matches
+    if self.children.center.atlas.name == needed_atlas.name and
+       card.children.center.sprite_pos.x == self.children.center.sprite_pos.x and
+       card.children.center.sprite_pos.y == self.children.center.sprite_pos.y and
+       dimensions_match(self, card) then
         return
     end
 
-    -- Not copying any other joker's sprite at the moment. Cache current sprite before updating
-    -- I'm using blueprint_sprite_copy for both blueprint and brainstorm - Jonathan
-    if not brainstorm.blueprint_sprite_copy then
-        brainstorm.blueprint_sprite_copy = brainstorm.children.center
-    else
-        brainstorm.children.center:remove()
-    end
-    -- I'm using blueprint_copy_key for both blueprint and brainstorm - Jonathan
-    brainstorm.blueprint_copy_key = card.config.center.key
-
-    brainstorm.children.center = Sprite(
-        brainstorm.T.x,
-        brainstorm.T.y,
-        brainstorm.T.w, brainstorm.T.h,
-        needed_atlas, {x = card.children.center.sprite_pos.x, y = card.children.center.sprite_pos.y})
-    brainstorm.children.center.states.hover = brainstorm.states.hover
-    brainstorm.children.center.states.click = brainstorm.states.click
-    brainstorm.children.center.states.drag = brainstorm.states.drag
-    brainstorm.children.center.states.collide.can = false
-    brainstorm.children.center:set_role({major = brainstorm, role_type = 'Glued', draw_major = brainstorm})
+    prepare_sprite_update(self, card)
+    setup_center_sprite(self, card, needed_atlas, card.children.center.sprite_pos)
 end
 
--- for both blueprint and brainstorm - Jonathan
-local function restore_sprite(blueprint)
-    if not blueprint.blueprint_sprite_copy then
+-- Unified restore function for both Blueprint and Brainstorm
+local function restore_sprite(card)
+    if not card.blueprint_sprite_copy then
         return
     end
 
-    blueprint.children.center:remove()
-    blueprint.children.center = blueprint.blueprint_sprite_copy
-    blueprint.blueprint_sprite_copy = nil
-    blueprint.blueprint_copy_key = nil
+    card.children.center:remove()
+    card.children.center = card.blueprint_sprite_copy
+    card.blueprint_sprite_copy = nil
+    card.blueprint_copy_key = nil
 
-    if blueprint.children.floating_sprite then
-        blueprint.children.floating_sprite:remove()
-        blueprint.children.floating_sprite = nil
+    if card.children.floating_sprite then
+        card.children.floating_sprite:remove()
+        card.children.floating_sprite = nil
     end
 
-    --if blueprint.children.floating_sprite2 then
-    --    blueprint.children.floating_sprite2:remove()
-    --    blueprint.children.floating_sprite2 = nil
-    --end
-
-    align_sprite(blueprint, nil, true)
+    -- Restore dimensions and scale.y using unified align_card
+    align_card(card, nil, true)
 end
 
 local card_draw = Card.draw
