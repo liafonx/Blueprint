@@ -28,6 +28,7 @@ fs-diff
 .cursor/
 .vscode/
 *.code-workspace
+scripts/
 
 # ========================================
 # AI Agent Files (local only)
