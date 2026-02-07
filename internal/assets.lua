@@ -33,6 +33,11 @@ function Game:set_render_settings()
         end
     end
 
+    -- Clear cached scaled background images and reset shader uniforms
+    if Blueprint.clear_caches then
+        Blueprint.clear_caches()
+    end
+
     if Blueprint.brainstorm_sprite then
         Blueprint.brainstorm_sprite:remove()
     end
@@ -40,6 +45,18 @@ function Game:set_render_settings()
     -- using some extra padding to fix this issue where the sticking out parts on the brainstormnt are pixelated
     -- because they are right on the edge of the image - Jonathan
     Blueprint.brainstorm_sprite = Sprite(0, 0, G.CARD_W, G.CARD_H, G.ASSET_ATLAS["blue_brainstorm"], {x=1, y=1})
+
+    -- Pre-load scaled background images for common joker aspect ratios
+    -- This avoids lag when first placing Blueprint/Brainstorm
+    if Blueprint.preload_scaled_backgrounds then
+        Blueprint.preload_scaled_backgrounds()
+    end
+
+    -- Pre-cache shader-processed atlases for common joker types
+    -- This generates Blueprint and Brainstorm textures during loading instead of gameplay
+    if Blueprint.preload_atlases then
+        Blueprint.preload_atlases()
+    end
 end
 
 function Blueprint.load_shaders()
@@ -50,6 +67,10 @@ function Blueprint.load_shaders()
     if success then
         print "Loaded all Blueprint mod shaders successfully"
         Blueprint.brainstorm_enabled = true
+        -- Initialize shader uniforms immediately after loading
+        if Blueprint.init_shader_uniforms then
+            Blueprint.init_shader_uniforms()
+        end
     else
         Blueprint.brainstorm_enabled = false
         print (
@@ -63,5 +84,9 @@ Loaded Blueprint shader, but Brainstorm seems to be unsupported by your system!
 =========================================================================
 
 ]])
+        -- Still initialize Blueprint shader uniforms
+        if Blueprint.init_shader_uniforms then
+            Blueprint.init_shader_uniforms()
+        end
     end
 end

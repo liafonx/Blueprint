@@ -37,21 +37,8 @@ local power = 1
 
 --------------------------------------------------
 
--- Avg blueprint color
-local canvas_background_color = {
-    (62 + 198) / 255 / 2,
-    (96 + 210) / 255 / 2,
-    (212 + 252) / 255 / 2,
-    0
-}
-
--- Blueprinted border color
-canvas_background_color = {
-    76 / 255,
-    108 / 255,
-    216 / 255,
-    0
-}
+-- Blueprint border color (used as canvas background)
+local canvas_background_color = {76 / 255, 108 / 255, 216 / 255, 0}
 
 
 local function is_blueprint(card)
@@ -70,36 +57,66 @@ end
 Blueprint.is_blueprint = is_blueprint
 Blueprint.is_brainstorm = is_brainstorm
 
-local function process_texture_blueprint(image)
-    local width, height = image:getDimensions()
-    local canvas = love.graphics.newCanvas(width, height, {type = '2d', readable = true, dpiscale = image:getDPIScale()})
+-- Cache for scaled background images (avoids recreating for same h_scale)
+local scaled_bg_cache = {}
 
-    love.graphics.push("all")
+-- Flag to track if shader uniforms have been initialized
+local shader_uniforms_initialized = false
 
-    love.graphics.setCanvas( canvas )
-    love.graphics.clear(canvas_background_color)
-    
-    love.graphics.setColor(1, 1, 1, 1)
+-- Flag to track if background images have been pre-loaded
+local bg_images_preloaded = false
 
-    G.SHADERS['blueprint_shader']:send('inverted', inverted_colors)
-    G.SHADERS['blueprint_shader']:send('lightness_offset', lightness_offset)
-    G.SHADERS['blueprint_shader']:send('mode', coloring_mode)
-    G.SHADERS['blueprint_shader']:send('expo', power)
-    love.graphics.setShader( G.SHADERS['blueprint_shader'] )
-    
-    -- Draw image with blueprint shader on new canvas
-    love.graphics.draw( image )
+-- Flag to track if shader-processed atlases have been pre-loaded
+local atlases_preloaded = false
 
-    love.graphics.pop()
+-- Initialize constant shader uniforms (called once during init, not every frame)
+function Blueprint.init_shader_uniforms()
+    if shader_uniforms_initialized then return end
 
-    return love.graphics.newImage(canvas:newImageData(), {mipmaps = true, dpiscale = image:getDPIScale()})
+    -- Blueprint shader constants
+    if G.SHADERS['blueprint_shader'] then
+        G.SHADERS['blueprint_shader']:send('inverted', inverted_colors)
+        G.SHADERS['blueprint_shader']:send('lightness_offset', lightness_offset)
+        G.SHADERS['blueprint_shader']:send('mode', coloring_mode)
+        G.SHADERS['blueprint_shader']:send('expo', power)
+    end
+
+    -- Brainstorm shader constants
+    if G.SHADERS['brainstorm_shader'] then
+        G.SHADERS['brainstorm_shader']:send('greyscale_weights', {0.299, 0.587, 0.114})
+        G.SHADERS['brainstorm_shader']:send('blur_amount', 1)
+        G.SHADERS['brainstorm_shader']:send('margin', {5, 5})
+        G.SHADERS['brainstorm_shader']:send('blue_low', {60.0/255.0, 100.0/255.0, 200.0/255.0, 0.4})
+        G.SHADERS['brainstorm_shader']:send('blue_high', {60.0/255.0, 100.0/255.0, 200.0/255.0, 0.8})
+        G.SHADERS['brainstorm_shader']:send('red_low', {200.0/255.0, 60.0/255.0, 60.0/255.0, 0.4})
+        G.SHADERS['brainstorm_shader']:send('red_high', {200.0/255.0, 60.0/255.0, 60.0/255.0, 0.8})
+        G.SHADERS['brainstorm_shader']:send('blue_threshold', 0.75)
+        G.SHADERS['brainstorm_shader']:send('red_threshold', 0.2)
+    end
+
+    shader_uniforms_initialized = true
+end
+
+-- Clear caches when graphics settings change
+-- Note: Does NOT reset shader uniforms - they remain valid across graphics changes
+function Blueprint.clear_caches()
+    scaled_bg_cache = {}
+    bg_images_preloaded = false
+    atlases_preloaded = false
 end
 
 local function scaled_bg_image(h_scale)
+    local cache_key = string.format("%.3f", h_scale)
+
+    if scaled_bg_cache[cache_key] then
+        return scaled_bg_cache[cache_key]
+    end
+
     local base_image = G.ASSET_ATLAS["blue_brainstorm_single"].image
     local width, height = base_image:getDimensions()
 
-    local canvas = love.graphics.newCanvas(width, height, {type = '2d', readable = true, dpiscale = base_image:getDPIScale()})
+    -- Use canvas directly as texture with GPU-side mipmaps (no CPU roundtrip)
+    local canvas = love.graphics.newCanvas(width, height, {type = '2d', mipmaps = 'auto', dpiscale = base_image:getDPIScale()})
     love.graphics.push("all")
 
     love.graphics.setCanvas(canvas)
@@ -107,15 +124,64 @@ local function scaled_bg_image(h_scale)
     love.graphics.draw(base_image)
 
     love.graphics.pop()
-    return love.graphics.newImage(canvas:newImageData(), {mipmaps = true, dpiscale = base_image:getDPIScale()})
+
+    canvas:generateMipmaps()
+    scaled_bg_cache[cache_key] = canvas
+    return canvas
+end
+
+-- Common h_scale values based on vanilla joker aspect ratios
+local common_h_scales = {
+    1.0,                    -- Normal jokers, Wee Joker (uniform scaling)
+    1.0 / 1.7,              -- Half Joker: H/1.7 → h_scale ≈ 0.588
+    1.0 / 1.2,              -- Photograph: H/1.2 → h_scale ≈ 0.833
+    0.745,                  -- Square Joker: H=W (empirically measured)
+}
+
+-- Pre-load scaled background images for common joker aspect ratios
+function Blueprint.preload_scaled_backgrounds()
+    if bg_images_preloaded then return end
+    if not G.ASSET_ATLAS or not G.ASSET_ATLAS["blue_brainstorm_single"] then return end
+
+    for _, h_scale in ipairs(common_h_scales) do
+        scaled_bg_image(h_scale)
+    end
+    bg_images_preloaded = true
+end
+
+local function process_texture_blueprint(image)
+    Blueprint.init_shader_uniforms()
+
+    local width, height = image:getDimensions()
+    -- Use canvas directly as texture with GPU-side mipmaps (no CPU roundtrip)
+    local canvas = love.graphics.newCanvas(width, height, {type = '2d', mipmaps = 'auto', dpiscale = image:getDPIScale()})
+
+    love.graphics.push("all")
+
+    love.graphics.setCanvas(canvas)
+    love.graphics.clear(canvas_background_color)
+
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.setShader(G.SHADERS['blueprint_shader'])
+
+    -- Draw image with blueprint shader on new canvas
+    love.graphics.draw(image)
+
+    love.graphics.pop()
+
+    canvas:generateMipmaps()
+    return canvas
 end
 
 local function process_texture_brainstorm(image, px, py, floating_image, offset, h_scale)
+    Blueprint.init_shader_uniforms()
+
     local width, height = image:getDimensions()
-    local canvas = love.graphics.newCanvas(width, height, {type = '2d', readable = true, dpiscale = image:getDPIScale()})
+    -- Temporary canvas for compositing (no mipmaps needed)
+    local temp_canvas = love.graphics.newCanvas(width, height, {type = '2d', dpiscale = image:getDPIScale()})
 
     love.graphics.push("all")
-    love.graphics.setCanvas(canvas)
+    love.graphics.setCanvas(temp_canvas)
     love.graphics.clear(canvas_background_color)
     love.graphics.setColor(1, 1, 1, 1)
 
@@ -125,38 +191,34 @@ local function process_texture_brainstorm(image, px, py, floating_image, offset,
     end
 
     love.graphics.pop()
-    
-    local canvas2 = love.graphics.newCanvas(width, height, {type = '2d', readable = true, dpiscale = image:getDPIScale()})
+
+    -- Final canvas with GPU-side mipmaps (no CPU roundtrip)
+    local result_canvas = love.graphics.newCanvas(width, height, {type = '2d', mipmaps = 'auto', dpiscale = image:getDPIScale()})
     love.graphics.push("all")
-    love.graphics.setCanvas(canvas2)
+    love.graphics.setCanvas(result_canvas)
     love.graphics.clear(canvas_background_color)
     love.graphics.setColor(1, 1, 1, 1)
-    
+
     local bgImage = scaled_bg_image(h_scale)
     bgImage:setWrap("repeat", "repeat")
     local bgQuad = love.graphics.newQuad(0, 0, width, height, bgImage)
     love.graphics.setShader()
     love.graphics.draw(bgImage, bgQuad)
 
-    -- G.SHADERS['brainstorm_shader']:send('dpi', image:getDPIScale())
+    -- Only send per-call uniforms (texture_size and card_size vary per joker)
     G.SHADERS['brainstorm_shader']:send('texture_size', {width, height})
-    G.SHADERS['brainstorm_shader']:send('greyscale_weights', {0.299, 0.587, 0.114})
-    G.SHADERS['brainstorm_shader']:send('blur_amount', 1)
     G.SHADERS['brainstorm_shader']:send('card_size', {px, py})
-    G.SHADERS['brainstorm_shader']:send('margin', {5, 5})
-    G.SHADERS['brainstorm_shader']:send('blue_low', {60.0/255.0, 100.0/255.0, 200.0/255.0, 0.4})
-    G.SHADERS['brainstorm_shader']:send('blue_high', {60.0/255.0, 100.0/255.0, 200.0/255.0, 0.8})
-    G.SHADERS['brainstorm_shader']:send('red_low', {200.0/255.0, 60.0/255.0, 60.0/255.0, 0.4})
-    G.SHADERS['brainstorm_shader']:send('red_high', {200.0/255.0, 60.0/255.0, 60.0/255.0, 0.8})
-    G.SHADERS['brainstorm_shader']:send('blue_threshold', 0.75)
-    G.SHADERS['brainstorm_shader']:send('red_threshold', 0.2)
-    
+
     love.graphics.setShader(G.SHADERS['brainstorm_shader'])
-    love.graphics.draw(canvas)
+    love.graphics.draw(temp_canvas)
 
     love.graphics.pop()
 
-    return love.graphics.newImage(canvas2:newImageData(), {mipmaps = true, dpiscale = image:getDPIScale()})
+    -- Release temporary canvas immediately to free GPU memory
+    temp_canvas:release()
+
+    result_canvas:generateMipmaps()
+    return result_canvas
 end
 
 
@@ -181,7 +243,11 @@ end
 local function pre_brainstormed(a, f, offset, h_scale)
     local atlas = a.name or a.key
     local floating_atlas = f and (f.name or f.key) or "nil"
-    local name = string.format("%s_(%s_%s_%s_%s)_brainstormed", atlas, floating_atlas, (offset and tostring(offset.x) or "nil"), (offset and tostring(offset.y) or "nil"), h_scale)
+    -- Round floating-point values to avoid cache misses from precision differences
+    local offset_x = offset and string.format("%.1f", offset.x) or "nil"
+    local offset_y = offset and string.format("%.1f", offset.y) or "nil"
+    local h_scale_key = string.format("%.3f", h_scale)
+    local name = string.format("%s_(%s_%s_%s_%s)_brainstormed", atlas, floating_atlas, offset_x, offset_y, h_scale_key)
     if G.ASSET_ATLAS[name] then
         return {
             old_name = atlas,
@@ -220,9 +286,8 @@ local function brainstorm_atlas(a, f, offset, h_scale)
 
     if not brainstormed.atlas then
         G.ASSET_ATLAS[brainstormed.new_name] = {}
-        -- using .blueprint for this aswell - Jonathan
         G.ASSET_ATLAS[brainstormed.new_name].blueprint = true
-        G.ASSET_ATLAS[brainstormed.new_name].name = brainstormed.new_name--G.ASSET_ATLAS[brainstormed.old_name].name
+        G.ASSET_ATLAS[brainstormed.new_name].name = brainstormed.new_name
         G.ASSET_ATLAS[brainstormed.new_name].type = G.ASSET_ATLAS[brainstormed.old_name].type
         G.ASSET_ATLAS[brainstormed.new_name].px = G.ASSET_ATLAS[brainstormed.old_name].px
         G.ASSET_ATLAS[brainstormed.new_name].py = G.ASSET_ATLAS[brainstormed.old_name].py
@@ -230,6 +295,45 @@ local function brainstorm_atlas(a, f, offset, h_scale)
     end
 
     return G.ASSET_ATLAS[brainstormed.new_name]
+end
+
+-- Pre-cache shader-processed atlases for common joker atlas
+function Blueprint.preload_atlases()
+    if atlases_preloaded then return end
+    if not G.ASSET_ATLAS or not G.ASSET_ATLAS["Joker"] then return end
+
+    local joker_atlas = G.ASSET_ATLAS["Joker"]
+
+    -- Pre-cache Blueprint version of Joker atlas
+    local bp_name = "Joker_blueprinted"
+    if not G.ASSET_ATLAS[bp_name] then
+        G.ASSET_ATLAS[bp_name] = {
+            blueprint = true,
+            name = joker_atlas.name,
+            type = joker_atlas.type,
+            px = joker_atlas.px,
+            py = joker_atlas.py,
+            image = process_texture_blueprint(joker_atlas.image)
+        }
+    end
+
+    -- Pre-cache Brainstorm versions for each common h_scale
+    for _, h_scale in ipairs(common_h_scales) do
+        local h_scale_key = string.format("%.3f", h_scale)
+        local bs_name = string.format("Joker_(nil_nil_nil_%s)_brainstormed", h_scale_key)
+        if not G.ASSET_ATLAS[bs_name] then
+            G.ASSET_ATLAS[bs_name] = {
+                blueprint = true,
+                name = bs_name,
+                type = joker_atlas.type,
+                px = joker_atlas.px,
+                py = joker_atlas.py,
+                image = process_texture_brainstorm(joker_atlas.image, joker_atlas.px, joker_atlas.py, nil, nil, h_scale)
+            }
+        end
+    end
+
+    atlases_preloaded = true
 end
 
 local function equal_sprites(first, second)
@@ -244,10 +348,7 @@ local function equal_sprites(first, second)
     return first.atlas.name == second.atlas.name and first.sprite_pos.x == second.sprite_pos.x and first.sprite_pos.y == second.sprite_pos.y
 end
 
--- Unified alignment function for both Blueprint and Brainstorm
--- Handles caching, dimension alignment, and aspect ratio calculation
--- Note: Does NOT set scale.y during alignment since sprites get replaced after this call
---       Callers should set scale.y on new sprites themselves if needed
+-- Align card dimensions and calculate aspect ratio change
 local function align_card(self, card, restore)
     if restore then
         -- Restore cached dimensions
@@ -458,16 +559,8 @@ local function find_blueprinted_joker(current_joker, previous_joker)
         return nil
     end
 
-    if use_debuff_logic then
-        if current_joker.debuff or previous_joker.debuff then
-            -- Copied card is debuffed, so shouldn't copy
-            return nil
-        end
-
-        -- current joker is blueprint. it is debuffed. so blueprints to the left aren't copying anything
-        if current_joker.debuff then
-            return nil
-        end
+    if use_debuff_logic and (current_joker.debuff or previous_joker.debuff) then
+        return nil
     end
 
     local should_copy = previous_joker.config.center.blueprint_compat

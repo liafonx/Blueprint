@@ -8,8 +8,7 @@
 4. Restart the game to load the mod.
 
 ## Features
-Dynamically changes blueprint texture to the joker it is copying.
-
+Dynamically changes blueprint and brainstorm texture to the joker it is copying.
 
 ## Credits
 - [Jonathan](https://github.com/jonathandw743) for adding dynamic Brainstorm joker, as well as a few crucial bugfixes.
